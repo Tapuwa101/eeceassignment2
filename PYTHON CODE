@@ -1,0 +1,106 @@
+import os, json
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from scipy.special import expit, logsumexp
+from scipy.optimize import minimize
+from sklearn.metrics import roc_curve, auc
+ROOT=os.path.dirname(os.path.abspath(__file__))
+OUT=os.path.join(ROOT,'EECE5644_A2_figures');os.makedirs(OUT,exist_ok=True)
+rng=np.random.default_rng(5644)
+
+# Question 1: Gaussian-mixture classification
+priors=np.array([.6,.4]); means=np.array([[[-.9,-1.1],[.8,.75]],[[-1.1,.9],[.9,-.75]]]); cov=np.diag([.75,1.25]); inv=np.linalg.inv(cov); sign,logdet=np.linalg.slogdet(cov)
+def generate_classification(n):
+    y=rng.choice(2,size=n,p=priors); part=rng.integers(0,2,size=n)
+    x=means[y,part]+rng.multivariate_normal(np.zeros(2),cov,size=n)
+    return x,y
+def gmm_loglik(x):
+    vals=[]
+    for k in range(2):
+        d=x[:,None,:]-means[k][None,:,:]
+        q=np.einsum('nki,ij,nkj->nk',d,inv,d)
+        vals.append(logsumexp(-.5*(q+2*np.log(2*np.pi)+logdet)-np.log(2),axis=1))
+    return np.column_stack(vals)
+def score_bayes(x):
+    ll=gmm_loglik(x)
+    return np.log(priors[1]/priors[0])+ll[:,1]-ll[:,0]
+def features(x,quadratic=False):
+    a,b=x[:,0],x[:,1]
+    return np.column_stack((np.ones(len(x)),a,b,a*a,a*b,b*b)) if quadratic else np.column_stack((np.ones(len(x)),a,b))
+def train_logistic(x,y,quadratic):
+    z=features(x,quadratic)
+    def fun(w):
+        s=z@w
+        return np.logaddexp(0,s).sum()-y@s
+    def jac(w): return z.T@(expit(z@w)-y)
+    fit=minimize(fun,np.zeros(z.shape[1]),jac=jac,method='BFGS',options={'gtol':1e-7,'maxiter':3000})
+    return fit.x,fit.fun,fit.success
+trains={n:generate_classification(n) for n in (20,200,2000)}
+xv,yv=generate_classification(10000)
+bscore=score_bayes(xv); bp=(bscore>=0).astype(int)
+result={'q1':{'bayes_error':float(np.mean(bp!=yv)),'bayes_errors':int(np.sum(bp!=yv)), 'bayes_confusion':[[int(np.sum((yv==a)&(bp==b))) for b in (0,1)] for a in (0,1)],'models':[]}}
+fpr,tpr,thr=roc_curve(yv,bscore);bfpr=np.mean(bp[yv==0]==1);btpr=np.mean(bp[yv==1]==1)
+fig,ax=plt.subplots(figsize=(6.6,4.8));ax.plot(fpr,tpr,label=f'Bayes score (AUC={auc(fpr,tpr):.3f})');ax.scatter([bfpr],[btpr],s=100,color='crimson',marker='*',label='Min-error threshold = 0',zorder=5);ax.plot([0,1],[0,1],':',color='gray');ax.set(xlabel='False positive rate',ylabel='True positive rate',title='Q1: ROC of Bayes discriminant');ax.legend();ax.grid(alpha=.25);fig.tight_layout();fig.savefig(os.path.join(OUT,'q1_roc.png'),dpi=180);plt.close(fig)
+fig,axs=plt.subplots(2,3,figsize=(12,7.5));xx,yy=np.meshgrid(np.linspace(-4,4,180),np.linspace(-4,4,180));mesh=np.column_stack([xx.ravel(),yy.ravel()]);
+for j,quadratic in enumerate((False,True)):
+ for i,n in enumerate((20,200,2000)):
+    x,y=trains[n];w,negll,success=train_logistic(x,y,quadratic);pred=(features(xv,quadratic)@w>=0).astype(int)
+    e=float(np.mean(pred!=yv));result['q1']['models'].append({'type':'quadratic' if quadratic else 'linear','n':n,'error':e,'errors':int(np.sum(pred!=yv)),'w':w.tolist(),'train_nll':float(negll),'optimizer_success':bool(success)})
+    ax=axs[j,i];zz=(features(mesh,quadratic)@w).reshape(xx.shape);ax.contourf(xx,yy,zz,levels=[-1e5,0,1e5],colors=['#cbd8ed','#f3c5c0'],alpha=.6);ax.contour(xx,yy,zz,levels=[0],colors='black',linewidths=1.7);ax.scatter(x[:,0],x[:,1],c=y,s=8 if n>200 else 16,cmap='coolwarm',vmin=0,vmax=1,edgecolors='none');ax.set(xlim=(-4,4),ylim=(-4,4),title=f'{"Quadratic" if quadratic else "Linear"} N={n}, error={e:.3f}',xlabel='x1',ylabel='x2')
+fig.tight_layout();fig.savefig(os.path.join(OUT,'q1_boundaries.png'),dpi=160);plt.close(fig)
+
+# Question 2: Gaussian-mixture dataset from the supplied code
+p=np.array([.3,.4,.3]);m=np.array([[-10,0,10],[0,0,0],[10,0,-10]],float)
+cs=np.array([[[1,0,-3],[0,1,0],[-3,0,15]],[[8,0,0],[0,.5,0],[0,0,.5]],[[1,0,-3],[0,1,0],[-3,0,15]]],float)
+def generate_regression(n):
+    groups=rng.choice(3,size=n,p=p)
+    data=np.zeros((n,3))
+    for k in range(3):
+        idx=groups==k
+        if idx.any():data[idx]=rng.multivariate_normal(m[k],cs[k],size=idx.sum())
+    return data[:,:2],data[:,2]
+def poly(x):
+    a,b=x[:,0],x[:,1]
+    return np.column_stack((np.ones(len(a)),a,b,a*a,a*b,b*b,a**3,a*a*b,a*b*b,b**3))
+xt,yt=generate_regression(100);xval,yval=generate_regression(1000)
+A=poly(xt);V=poly(xval);wml=np.linalg.lstsq(A,yt,rcond=None)[0]
+variance=float(np.mean((A@wml-yt)**2));ml_mse=float(np.mean((V@wml-yval)**2));gammas=np.logspace(-4,8,49)
+rows=[]
+for gamma in gammas:
+    reg=variance/gamma
+    w=np.linalg.solve(A.T@A+reg*np.eye(A.shape[1]),A.T@yt)
+    rows.append([gamma,float(np.mean((V@w-yval)**2)),float(np.linalg.norm(w-wml))])
+rows=np.array(rows);idx=int(np.argmin(rows[:,1]));best=rows[idx]
+result['q2']={'ntrain':100,'nvalidation':1000,'sigma2_est':variance,'ml_validation_mse':ml_mse,'ml_coefficients':wml.tolist(),'best_gamma':float(best[0]),'best_map_validation_mse':float(best[1]),'gamma_results':rows.tolist()}
+fig,ax=plt.subplots(figsize=(7,4.5));ax.semilogx(rows[:,0],rows[:,1],'-o',markersize=3,label='MAP');ax.axhline(ml_mse,linestyle='--',color='black',label=f'ML MSE={ml_mse:.3f}');ax.scatter([best[0]],[best[1]],s=65,color='red',label='Lowest observed MAP MSE');ax.set(xlabel='Prior variance gamma (log scale)',ylabel='Validation mean squared error',title='Q2: MAP versus prior variance');ax.grid(alpha=.3);ax.legend();fig.tight_layout();fig.savefig(os.path.join(OUT,'q2_map_mse.png'),dpi=180);plt.close(fig)
+
+# Question 3: Vehicle localization
+true=np.array([.42,-.35]);sig=.3;sx=sy=.25
+from scipy.optimize import minimize as minop
+xgrid=np.linspace(-2,2,231);X,Y=np.meshgrid(xgrid,xgrid)
+def objective(coords,marks,meas):
+    pos=np.asarray(coords)
+    v=np.sum((pos/sx)**2,axis=-1)/2
+    d=np.linalg.norm(pos[...,None,:]-marks,axis=-1)
+    return v+np.sum((d-meas)**2,axis=-1)/(2*sig**2)
+entries=[];surfaces=[]
+for k in (1,2,3,4):
+    a=2*np.pi*np.arange(k)/k;mark=np.column_stack((np.cos(a),np.sin(a)))
+    actual=np.linalg.norm(mark-true,axis=1)
+    meas=actual+rng.normal(0,sig,k)
+    while np.any(meas<0):
+        mask=meas<0;meas[mask]=actual[mask]+rng.normal(0,sig,np.sum(mask))
+    fun=lambda pos:float(objective(pos,mark,meas));res=minop(fun,[0,0],method='BFGS',tol=1e-12)
+    coords=np.stack((X,Y),axis=-1);surface=objective(coords,mark,meas);surfaces.append(surface)
+    entries.append({'K':k,'landmarks':mark.tolist(),'ranges':meas.tolist(),'map':res.x.tolist(),'distance_to_true':float(np.linalg.norm(res.x-true)),'objective_min':float(res.fun)})
+result['q3']={'true_position':true.tolist(),'sigma_measurement':sig,'sigma_x':sx,'sigma_y':sy,'cases':entries}
+levels=np.array([.5,1,2,4,6,8,12,16,24,36,50,70,100,150,210,300,420,600,800,1100,1500])
+fig,axs=plt.subplots(2,2,figsize=(10.5,9))
+for i,(ax,e,surface) in enumerate(zip(axs.ravel(),entries,surfaces)):
+    mark=np.array(e['landmarks']);pos=np.array(e['map'])
+    ax.contour(X,Y,surface,levels=levels,linewidths=.8,cmap='viridis');ax.scatter(mark[:,0],mark[:,1],s=65,facecolors='none',edgecolors='blue',label='Landmark');ax.scatter([true[0]],[true[1]],color='red',marker='+',s=130,linewidths=2.4,label='True position');ax.scatter([pos[0]],[pos[1]],color='black',marker='x',s=70,label='MAP');ax.set(xlim=(-2,2),ylim=(-2,2),aspect='equal',xlabel='x',ylabel='y',title=f'K={e["K"]}, MAP error={e["distance_to_true"]:.3f}');ax.grid(alpha=.15)
+axs[0,0].legend(fontsize=8);fig.suptitle('Q3: Shared contour levels for every K');fig.tight_layout();fig.savefig(os.path.join(OUT,'q3_map_contours.png'),dpi=180);plt.close(fig)
+with open(os.path.join(ROOT,'EECE5644_A2_results.json'),'w') as f:json.dump(result,f,indent=2)
+print('Q1',result['q1']['bayes_error'],[(t['type'],t['n'],t['error']) for t in result['q1']['models']]);print('Q2',variance,ml_mse,best);print('Q3',[(e['K'],e['distance_to_true']) for e in entries])
